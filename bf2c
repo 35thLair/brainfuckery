@@ -1,0 +1,229 @@
+#!/bin/bash -e
+
+# A brainfuck to C conversion script.
+
+# The jist of this is fairly simple.
+# It does a find and replace for the eight brainfuck operators and adds just a bit of additional code as overhead
+# It can also optionally compile the c source code using gcc.
+
+# (This is the idea at least.)
+
+#   The eight commands of Brainfuck and their equivilence in C:
+
+#   >   becomes 	++p;
+#   < 	becomes 	--p;
+#   + 	becomes 	++*p;
+#   - 	becomes 	--*p;
+#   . 	becomes 	putchar(*p);
+#   , 	becomes 	*p = getchar();
+#   [ 	becomes 	while (*p) {
+#   ] 	becomes 	}
+
+#   See: http://www.muppetlabs.com/~breadbox/bf/
+
+usage() {
+echo -e "\n\tUsage: bf2c [OPTION] input-file [output-file]
+\t    -c      compile to the named output-file minus the extension
+\t    -s      create an assembly file named 'output-file.s'
+\t    -h      display this help and exit\n
+\tThis is a simple script to convert brainfuck source files to C and optionally assembly source files or compiles the C.
+\tWith no options, an source file named 'output-file.c' is made.
+\tIf no output-file is named, the basename of the input-file will be used.
+\tTrying to use gcc with odd file names gives errors.  Use names with '.c' or '.s'.
+\tAny characters that are not one of the eight brainfuck operators (+-<>.,[]) will be stripped from the file before it is converted.
+\tSo feel free to use comments and whitespace, but do not include any of the operators in the comments or bad things will happen.\n
+\tExit codes: 1\tgeneral error
+\t            4\tfilename conflicts
+\t            0\tsuccess\n"
+
+    exit $1
+}
+
+options() {
+
+case $1 in
+    -h )
+    usage 0;;
+    
+    -c )
+    compile="true";;
+    
+    -s )
+    asm="true";;
+        
+    -* )
+    echo -e "\n\tUnknown option."
+    usage 1;;
+    
+esac    
+}
+
+noclobber () {
+
+#
+#   Check for good file names.
+#
+
+[ $compile ] && compiled_file=`basename $output_file .c`
+    
+[ $asm ] && asm_file=`basename $output_file .c`.s
+
+if [[ $compile && -e $compiled_file ]] ; then
+    echo -e '\n\tCompiler output file "'$compiled_file'" already exists.'
+    bad_files="true"
+fi
+
+if [ $asm ] ; then
+    if [ -e $asm_file ] ; then
+    echo -e '\n\tAsm output file "'$asm_file'" already exists.'
+    bad_files="true"
+    fi  
+fi
+
+if [ ! -e $input_file ] ; then
+    echo -e '\n\tInput file "'$input_file'" does not exists.'
+    bad_files="true"
+fi
+
+if [ -e $output_file ] ; then
+    echo -e '\n\tSource output file "'$output_file'" already exists.'
+    bad_files="true"
+fi
+
+
+temp_file=`mktemp`
+if [ $? -ne 0 ]; then
+        rm -f $temp_file
+        echo -e "\n\tError: "$? 'can not use "mktemp" to make the temporary file'
+        bad_files="true"
+fi
+
+if [ $bad_files ] ; then usage 6 ; fi
+
+
+}
+
+#
+#   This is the section that deals with the options and filenames.
+#
+
+case $# in
+    0)      
+    usage 0;;                     # show help and exit
+            
+    1)
+    if [[ "$1" == -* ]] ; then  # if only options then only help
+        usage 0
+        else                    # assume it is a file name  
+        input_file="$1"
+        # if the file extension is not '.bf', then the '.c' is appended instead of replaced
+        output_file=`basename $input_file .bf`.c    
+    fi;;
+    
+    2)
+    if [[ "$1" == -* ]] ; then
+        options $1
+        [[ "$2" == -* ]] && ( echo -e '\n\tHorrible file name or option.' && usage 4 )
+        input_file="$2"
+        # if the file extension is not '.bf', then the '.c' is appended instead of replaced
+        output_file=`basename $input_file .bf`.c
+        else
+        input_file="$1"
+        output_file="$2"
+    fi;;
+    
+    3)
+    if [[ "$1" == -* ]] ; then
+        options $1
+        [[ "$2" == -* || "$3" == -* ]] &&  ( echo -e '\n\tHorrible file name or option.' && usage 4 )
+        input_file="$2"
+        output_file="$3"
+        else 
+        echo -e "\n\tYou entered too many file names."
+        usage 1
+    fi;;
+    
+    *)
+    echo -e "\n\tYou entered too many options or file names."
+    usage 1;;
+    
+esac
+
+noclobber                       #   Check for good file names.
+
+cp $input_file $temp_file       #   Working on the original file is bad.
+
+
+#
+#   This is the section that removes any comments in the brainfuck source code.
+#       If anyone used any of the eight bf operators in the comments, they deserve what they get.
+
+                                       # Writing this regex was a true joy.  The order of the operators matter.
+sed -i "s/[^].[,<>+-]//g" $temp_file   # Carefully reading of the manual at gnu.org was needed.
+                                       # ']' needs to be right after the '^' and '-' needs to be last.
+                                       # '][' together is a no-no, which sort of makes sense, but is not documented.
+
+#
+#   This is the section that converts the brainfuck.
+#
+
+sed -i "s/+/++*p;\n/g" $temp_file      # It is critical to change the '+' first, because the '+' is also in the output
+sed -i "s/-/--*p;\n/g" $temp_file      # The same is true for the '-'; now it is okay to change the '>' and '<'.
+sed -i "s/>/++p;\n/g" $temp_file  
+sed -i "s/</--p;\n/g" $temp_file  
+sed -i "s/\./putchar(*p);\n/g" $temp_file             # '.' needs to be escaped
+sed -i "s/,/*p = getchar();\n/g" $temp_file  
+sed -i "s/\[/while (*p) {\n/g" $temp_file             # '[' needs to be escaped
+sed -i "s/]/}\n/g" $temp_file  
+
+#
+#   This is the section that creates a boilerplate C source file for brainfuck.
+#       Why not do this first and to the same file?  The '<stdio.h>' would get expended by sed.
+#
+
+echo "
+/* Brainfuck to C, created by a Bash script */
+
+#include <stdio.h>          // required for putchar() and getchar()
+
+int main(void) {
+
+char bf[30000];             // an array of 30,000 bytes is an unoffical standard
+char *p = bf;               // sometimes it is polite to point
+" > $output_file
+
+cat $temp_file >> $output_file  # Combine what we have so far--almost done!
+
+#
+#   This is the end of the boilerplate C source file.
+#
+
+echo "/* All the code above this is from Brainfuck */
+	
+return 0;   //  this should be more properly handled by the brainfuck program, but that is not likely to happen
+
+}           //  done!
+" >> $output_file 
+
+
+rm $temp_file           #   Time to clean up.
+
+#
+#   This is the section that uses gcc to compile.
+#       Options: output name, asm file
+
+
+[[ $compile || $asm ]] && echo "(Any errors below are from gcc.)" # Not my dog.
+
+if [ $compile ] ; then
+    gcc -o $compiled_file $output_file
+fi
+
+if [ $asm ] ; then
+    gcc -S $output_file
+fi
+
+exit 0
+
+
+
